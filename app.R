@@ -79,7 +79,51 @@ ui <- page_sidebar(
                    textOutput("heatmap_subtitle"),
                    imageOutput("heatmap_img")
               )
+    ),
+
+    # ---- Tab 5: QC ----------------------------------------------------------
+    nav_panel("QC", value = "qc",
+              p("Cohort-level QC computed by R/run_qc.R on the full subcohort; sidebar sample filters do not apply. Flags are informational -- no samples are excluded.",
+                class = "text-muted", style = "font-size: 0.85em; margin: 0 1rem 0.5rem;"),
+              navset_card_tab(
+                id = "qc_tabs",
+                full_screen = TRUE,
+
+                nav_panel("Assay missingness", value = "qc_miss",
+                          card(full_screen = TRUE,
+                               card_header("Assay missingness (top 20)"),
+                               textOutput("qc_miss_text"),
+                               plotlyOutput("qc_assay_missing", height = "420px")
+                          )
+                ),
+
+                nav_panel("Sample missingness", value = "qc_samp",
+                          card(full_screen = TRUE,
+                               card_header("Sample missingness (nonzero samples)"),
+                               textOutput("qc_samp_text"),
+                               DTOutput("qc_sample_missing")
+                          )
+                ),
+
+                nav_panel("Outliers", value = "qc_outl",
+                          card(full_screen = TRUE,
+                               card_header("Sample outliers (PCA distance)"),
+                               textOutput("qc_outl_text"),
+                               DTOutput("qc_outlier_table")
+                          )
+                ),
+
+                nav_panel("Plates", value = "qc_plate",
+                          card(full_screen = TRUE,
+                               card_header("Plate x Group balance"),
+                               textOutput("qc_plate_text"),
+                               plotlyOutput("qc_plate", height = "420px")
+                          )
+                )
+              )
     )
+
+
   )
 )
 
@@ -341,6 +385,107 @@ server <- function(input, output, session) {
     ))
     list(src = src, width = "100%", alt = "Top-DE protein heatmap")
   }, deleteFile = FALSE)
+
+  # ---- 5. QC ----------------------------------------------------------------
+  qc_data <- reactive({
+    req(input$subcohort)
+    path <- file.path("outputs", input$subcohort, "qc.rds")
+    shiny::validate(shiny::need(
+      file.exists(path),
+      "QC results not found -- run R/run_qc.R first."
+    ))
+    readRDS(path)
+  })
+
+  output$qc_miss_text <- renderText({
+    p <- qc_data()$params
+    sprintf("%d cells; %d missing (%.2f%%); %d assays / %d samples over %.0f%%",
+            p$possible_cells, p$n_missing_cells, 100 * p$frac_missing_cells,
+            p$n_assays_flagged_missing, p$n_samples_flagged_missing,
+            100 * p$max_missing_threshold)
+  })
+
+  output$qc_assay_missing <- renderPlotly({
+    d <- qc_data()$result$assay_missingness |>
+      filter(n_missing > 0) |>
+      slice_max(frac_missing, n = 20, with_ties = FALSE)
+    shiny::validate(shiny::need(nrow(d) > 0,
+                                "No missing assay values in this subcohort."))
+    d <- d |>
+      mutate(status = factor(
+        if_else(flag_missing, "over threshold", "within threshold"),
+        levels = c("over threshold", "within threshold")))
+    plot_ly(d, x = ~reorder(Assay, -frac_missing), y = ~100 * frac_missing,
+            color = ~status,
+            colors = c("over threshold" = "#d73027",
+                       "within threshold" = "#4393c3"),
+            type = "bar", hoverinfo = "text",
+            text = ~paste0(Assay, " (", Panel, "): ", n_missing,
+                           " of ", n_missing + n_observed, " samples")) |>
+      layout(
+        xaxis = list(title = NULL, tickangle = -45),
+        yaxis = list(title = "% of samples missing"),
+        margin = list(b = 100),
+        showlegend = FALSE,
+        shapes = list(list(
+          type = "line", x0 = 0, x1 = 1, xref = "paper",
+          y0 = 20, y1 = 20,
+          line = list(dash = "dash", color = "grey45")))
+      )
+  })
+
+  output$qc_outl_text <- renderText({
+    p <- qc_data()$params
+    sprintf("%s | %d of %d flagged",
+            p$outlier_screen$method, p$outlier_screen$n_flagged, p$n_samples)
+  })
+
+  output$qc_outlier_table <- renderDT({
+    qc_data()$result$outliers |>
+      slice_head(n = 10) |>
+      mutate(flagged = if_else(flagged, "FLAGGED", "")) |>
+      datatable(options = list(pageLength = 10), rownames = FALSE) |>
+      formatRound(c("dist", "z"), digits = 2)
+  })
+
+  output$qc_samp_text <- renderText({
+    p <- qc_data()$params
+    paste0(p$missing_encoding, ". Threshold ",
+           round(100 * p$max_missing_threshold), "%.")
+  })
+
+  output$qc_sample_missing <- renderDT({
+    d <- qc_data()$result$sample_missingness |> filter(n_missing > 0)
+    shiny::validate(shiny::need(nrow(d) > 0,
+                                "No sample has missing values."))
+    d |>
+      mutate(flag_missing = if_else(flag_missing, "FLAGGED", "")) |>
+      datatable(options = list(pageLength = 10), rownames = FALSE) |>
+      formatRound("frac_missing", digits = 3)
+  })
+
+  output$qc_plate_text <- renderText({
+    p <- qc_data()$params
+    if (p$n_plates == 1) "Single plate -- batch QC not applicable for this subcohort."
+    else sprintf("%d plates; controls spread across plates by design", p$n_plates)
+  })
+
+  output$qc_plate <- renderPlotly({
+    d <- qc_data()$result$plate_summary |>
+      mutate(Group = factor(Group, levels = c("NEGATIVE", "POSITIVE")))
+    plot_ly(d, x = ~Plate, y = ~n, color = ~Group,
+            colors = c(NEGATIVE = "#4575b4", POSITIVE = "#d73027"),
+            type = "bar", hoverinfo = "text",
+            text = ~paste0(Plate, " / ", Group, ": ", n, " samples")) |>
+      layout(
+        barmode = "group",
+        xaxis = list(title = NULL),
+        yaxis = list(title = "Samples"),
+        legend = list(orientation = "h", x = 0, y = 1.1),
+        margin = list(t = 60)
+      )
+  })
+
 }
 
 shinyApp(ui, server)
