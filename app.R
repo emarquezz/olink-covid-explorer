@@ -1,4 +1,4 @@
-# app.R -- Steps 5-10: data table + volcano + PCA tabs
+# app.R -- Steps 5-12: data table + volcano + PCA + heatmap tabs
 library(shiny)
 library(bslib)
 library(DT)
@@ -63,6 +63,21 @@ ui <- page_sidebar(
                 selectInput("pca_color", "Color by", choices = "Group"),
                 textOutput("pca_subtitle"),
                 plotlyOutput("pca_plot", height = "520px")
+              )
+    ),
+
+    # ---- Tab 4: Heatmap ----------------------------------------------------
+    nav_panel("Heatmap", value = "heatmap",
+              card(full_screen = TRUE,
+                   card_header("Top-DE protein heatmaps"),
+                   p("Cohort-level view of build-time artifacts from R/run_heatmap.R; sidebar sample filters do not apply to this tab.",
+                     class = "text-muted", style = "font-size: 0.85em; margin: 0 1rem 0.5rem;"),
+                   selectInput("heatmap_view", "View",
+                               choices = c("Category average" = "category",
+                                           "Per-sample"       = "sample"),
+                               selected = "category"),
+                   textOutput("heatmap_subtitle"),
+                   imageOutput("heatmap_img")
               )
     )
   )
@@ -168,6 +183,7 @@ server <- function(input, output, session) {
       yend = c(ymax, ymax, -log10(input$fdr_thr))
     )
 
+
     plot_ly(d, x = ~logFC, y = ~p_neg,
             color = ~category, colors = pal,
             type = "scatter", mode = "markers",
@@ -199,9 +215,6 @@ server <- function(input, output, session) {
     readRDS(path)
   })
 
-  # Adaptive color-by: choices computed FROM THE DATA, not hardcoded per
-  # subcohort. A column qualifies only if it exists and has >1 distinct
-  # value -- so serum (Severity all-NA) and single-valued columns drop out.
   observeEvent(input$subcohort, {
     res <- pca_data()$result
     candidates <- c("Group", "Sex", "Age", "Severity", "Plate")
@@ -212,9 +225,6 @@ server <- function(input, output, session) {
                       choices = ok, selected = "Group")
   })
 
-  # PCA points respect the sidebar group filter. Statistically safe:
-  # PC axes come from the full-subcohort artifact; filtering only
-  # selects which samples are displayed on those fixed axes.
   pca_filtered <- reactive({
     req(input$group)
     d <- pca_data()$result
@@ -244,8 +254,6 @@ server <- function(input, output, session) {
                      "PC1: ", round(PC1, 1), " | PC2: ", round(PC2, 1))
       )
 
-    # --- Color strategy: fixed pair for Group; ORDINAL gradients for
-    # Severity / Age (darker = more severe / older); qualitative otherwise.
     if (col == "Group") {
       d <- d |> mutate(color_by = factor(color_by,
                                          levels = c("POSITIVE", "NEGATIVE")))
@@ -264,12 +272,10 @@ server <- function(input, output, session) {
       d <- d |> mutate(color_by = factor(color_by, levels = present))
 
     } else if (col == "Age") {
-      # order bins by numeric lower bound: (0,20] < (20,40] < ...
-      # ramp anchored at brewer stops 3-9 so the youngest bin stays visible
       lv   <- levels(d$color_by)
       lv   <- lv[order(as.numeric(sub("^\\((\\d+).*$", "\\1", lv)))]
       ramp <- colorRampPalette(
-        RColorBrewer::brewer.pal(9, "Blues")[5:9])(length(lv))
+        RColorBrewer::brewer.pal(9, "Blues")[3:9])(length(lv))
       pal  <- setNames(ramp, lv)
       d    <- d |> mutate(color_by = factor(color_by, levels = lv))
 
@@ -292,6 +298,49 @@ server <- function(input, output, session) {
         margin = list(t = 80, r = 20)
       )
   })
+
+  # ---- 4. Heatmap (serves build-time PNG artifacts) -------------------------
+  # ComplexHeatmap renders via grid at BUILD time; the app only serves the
+  # PNGs. deleteFile = FALSE is essential: these are committed pipeline
+  # artifacts, and renderImage's default (TRUE) would delete them.
+  heatmap_meta <- reactive({
+    req(input$subcohort)
+    path <- file.path("outputs", input$subcohort, "heatmap.rds")
+    shiny::validate(shiny::need(
+      file.exists(path),
+      "Heatmap artifact not found -- run R/run_heatmap.R first."
+    ))
+    readRDS(path)$params
+  })
+
+  output$heatmap_subtitle <- renderText({
+    req(input$heatmap_view)
+    p <- heatmap_meta()
+    if (input$heatmap_view == "category") {
+      cv <- p$category_view
+      counts <- paste(
+        sprintf("%s: %d", names(cv$n_per_category),
+                as.integer(cv$n_per_category)),
+        collapse = " | ")
+      sprintf("Top %d by adj.P (%d up / %d down) | mean z per %s category | %s",
+              p$top_n, p$n_up, p$n_down, cv$category_source, counts)
+    } else {
+      sprintf("Top %d by adj.P (%d up / %d down) | %d samples | columns: Group -> Severity -> SampleID, not clustered",
+              p$top_n, p$n_up, p$n_down, p$n_samples)
+    }
+  })
+
+  output$heatmap_img <- renderImage({
+    req(input$heatmap_view, input$subcohort)
+    fname <- if (input$heatmap_view == "category") "heatmap_categories.png"
+    else "heatmap.png"
+    src <- file.path("outputs", input$subcohort, fname)
+    shiny::validate(shiny::need(
+      file.exists(src),
+      paste0(fname, " not found -- rerun R/run_heatmap.R.")
+    ))
+    list(src = src, width = "100%", alt = "Top-DE protein heatmap")
+  }, deleteFile = FALSE)
 }
 
 shinyApp(ui, server)
