@@ -1,0 +1,8 @@
+.Rproj.user
+data/*.csv
+report_*.html
+.DS_Store
+.Rhistory
+.RData
+.httr-oauth
+.quarto
