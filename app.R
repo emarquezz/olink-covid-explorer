@@ -51,7 +51,8 @@ ui <- page_sidebar(
                   sliderInput("fdr_thr", "FDR threshold (adj.P)",
                               min = 0.001, max = 0.25, value = 0.05, step = 0.005)
                 ),
-                textOutput("volcano_counts"),
+                div(textOutput("volcano_counts"),
+                    style = "margin: 0.85rem 1rem 0.35rem; font-size: 0.92em;"),
                 plotlyOutput("volcano", height = "500px")
               )
     ),
