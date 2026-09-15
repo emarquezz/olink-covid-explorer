@@ -1,5 +1,8 @@
 # Olink COVID-19 Explorer
 
+**Live app:** [https://emarquez.shinyapps.io/olink-covid-explorer/](https://emarquezz.shinyapps.io/olink-covid-explorer/)
+
+
 **A two-matrix reanalysis of the COVID-19 proteome response — Olink NPX, 436 proteins, five panels — built as five verified pipelines, a five-tab Shiny app, and a self-updating report, all reading from the same committed artifacts.**
 
   ## The story
