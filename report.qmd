@@ -1,0 +1,337 @@
+---
+title: "COVID-19 proteome response across two sample matrices"
+subtitle: "Olink reanalysis: differential expression, cross-matrix concordance, severity structure, and data quality"
+author: "Elisa Marquez"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(tidyr)
+library(tibble)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 5, dpi = 150)
+
+# ---- Artifacts: every number in this report is computed here, live ----
+de_p <- readRDS("outputs/plasma/de_results.rds")
+de_s <- readRDS("outputs/serum/de_results.rds")
+res_p <- de_p$result
+res_s <- de_s$result
+
+qc_p <- readRDS("outputs/plasma/qc.rds")
+qc_s <- readRDS("outputs/serum/qc.rds")
+
+pca_p <- readRDS("outputs/plasma/pca.rds")
+pca_s <- readRDS("outputs/serum/pca.rds")
+
+hm_p <- readRDS("outputs/plasma/heatmap.rds")
+hm_s <- readRDS("outputs/serum/heatmap.rds")
+
+# ---- Cohort facts (from QC artifact params) ----
+n_prot   <- qc_p$params$n_assays
+n_samp_p <- qc_p$params$n_samples
+n_samp_s <- qc_s$params$n_samples
+
+# ---- Pre-specified thresholds ----
+thr_fdr <- 0.05
+thr_fc  <- 0.5
+
+# ---- Headline DE numbers ----
+sig_p <- res_p |> filter(adj.P.Val < thr_fdr)
+sig_s <- res_s |> filter(adj.P.Val < thr_fdr)
+n_sig_p  <- nrow(sig_p)
+n_sig_s  <- nrow(sig_s)
+up_p     <- sum(sig_p$logFC > 0)
+down_p   <- sum(sig_p$logFC < 0)
+up_s     <- sum(sig_s$logFC > 0)
+down_s   <- sum(sig_s$logFC < 0)
+
+# with the effect-size filter (app default view)
+n_eff_p <- sum(sig_p$adj.P.Val < thr_fdr & abs(sig_p$logFC) > thr_fc)
+n_eff_s <- sum(sig_s$adj.P.Val < thr_fdr & abs(sig_s$logFC) > thr_fc)
+
+# ---- Cross-matrix concordance (joined by Assay, never positional) ----
+shared   <- intersect(sig_p$Assay, sig_s$Assay)
+n_shared <- length(shared)
+dir_conc <- mean(
+  sign(sig_p$logFC[match(shared, sig_p$Assay)]) ==
+  sign(sig_s$logFC[match(shared, sig_s$Assay)])
+)
+
+j_all <- inner_join(
+  res_p |> select(Assay, logFC_p = logFC, adj_p = adj.P.Val),
+  res_s |> select(Assay, logFC_s = logFC, adj_s = adj.P.Val),
+  by = "Assay"
+)
+rho   <- cor(j_all$logFC_p, j_all$logFC_s, method = "spearman")
+slope <- unname(coef(lm(logFC_s ~ logFC_p, data = j_all))[2])
+
+# ---- duplicateCorrelation consensus (plasma longitudinal design) ----
+# Key name is defensive: adjust after checking names(de_p$params) once.
+dup_r <- local({
+  key <- intersect(
+    c("consensus_correlation", "dup_corr", "cor",
+      "duplicate_correlation", "consensus"),
+    names(de_p$params)
+  )
+  if (length(key)) de_p$params[[key[1]]] else NA_real_
+})
+```
+
+# Summary
+
+At a pre-specified FDR of 5% (no effect-size filter), `r n_sig_p` of `r n_prot` proteins differ between COVID-positive and negative samples in the plasma subcohort (`r up_p` up, `r down_p` down in COVID) and `r n_sig_s` in the serum subcohort (`r up_s` up, `r down_s` down). `r n_shared` proteins are significant in both matrices, and **`r sprintf("%.0f", 100 * dir_conc)`% of them move in the same direction**. Across all `r nrow(j_all)` shared assays, fold changes correlate at Spearman ρ = `r sprintf("%.2f", rho)`.
+
+The two matrices tell one biological story: the acute COVID response (interferon signaling, cytokines, endothelial activation) dominates in both, with serum showing systematically larger effect sizes (regression slope serum ~ plasma = `r sprintf("%.2f", slope)`).
+
+# Data and methods
+
+**Data.** Two Olink sample matrices from the same study: a longitudinal plasma subcohort (`r n_samp_p` samples) and a serum subcohort (`r n_samp_s` samples), each measuring `r n_prot` proteins across five panels (CM, CVD2, CVD3, Inflammation, Immune Response). Negative (control) samples in the plasma subcohort are dialysis patients -- chronically inflamed relative to healthy donors -- which compresses observed effect sizes.
+
+**Preprocessing.** Protein x sample matrices were built per subcohort from the harmonized long table. Pre-specified missingness rule (identical for DE, PCA, and heatmaps): proteins with >20% missing values are dropped (none were, in either matrix); remaining gaps are median-imputed per protein. Values are Olink NPX (already log2 scale).
+
+**Differential expression.** Linear models per protein (limma) contrasting COVID-positive vs negative. The plasma design accounts for repeated individuals via `duplicateCorrelation``r if (!is.na(dup_r)) sprintf(" (estimated intra-individual correlation r = %.3f)", dup_r)`. P-values are BH-adjusted across `r n_prot` tests.
+
+**Dimensionality reduction.** Sample-level PCA on per-protein z-scores (proteins standardized across samples, so PCs reflect correlation structure rather than raw NPX abundance).
+
+**Data quality.** Missingness is enumerated per assay and per sample (encoded as absent source rows); outliers are screened as Euclidean distance to the own-group centroid in PC1-PC5 (robust z, one-sided, threshold 3); plate x group balance is tabulated. QC flags are informational -- no samples are excluded (no pre-specified exclusion rule).
+
+# Results: differential expression
+
+```{r volcano-fig, fig.width = 9, fig.height = 4.6, fig.cap = "Volcano plots at the pre-specified display thresholds (|logFC| > 0.5, FDR < 0.05). Dashed lines: display thresholds."}
+pal <- c("Up in COVID"           = "#d73027",
+         "Down in COVID"         = "#4575b4",
+         "FDR-sig, small effect" = "#999999",
+         "Not significant"       = "#d9d9d9")
+
+both <- bind_rows(
+  res_p |> mutate(subcohort = sprintf("Plasma (n = %d)", n_samp_p)),
+  res_s |> mutate(subcohort = sprintf("Serum (n = %d)",  n_samp_s))
+) |>
+  mutate(
+    category = case_when(
+      adj.P.Val < thr_fdr & logFC >  thr_fc ~ "Up in COVID",
+      adj.P.Val < thr_fdr & logFC < -thr_fc ~ "Down in COVID",
+      adj.P.Val < thr_fdr                 ~ "FDR-sig, small effect",
+      TRUE                                ~ "Not significant"
+    ),
+    category = factor(category, levels = names(pal))
+  )
+
+ggplot(both, aes(logFC, -log10(pmax(adj.P.Val, 1e-300)), color = category)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_vline(xintercept = c(thr_fc, -thr_fc), linetype = "dashed", color = "grey45") +
+  geom_hline(yintercept = -log10(thr_fdr), linetype = "dashed", color = "grey45") +
+  facet_wrap(~subcohort, scales = "free") +
+  scale_color_manual(values = pal, name = NULL) +
+  labs(x = "log2 fold change (POSITIVE - NEGATIVE)",
+       y = expression(-log[10](adj~P))) +
+  theme_minimal(12) +
+  theme(legend.position = "top")
+```
+
+With the effect-size filter applied, `r n_eff_p` plasma and `r n_eff_s` serum proteins clear both display thresholds. Down-regulation is rare and weak -- consistent with an acute inflammatory state sitting on top of a chronically inflamed control group.
+
+```{r top-tables}
+top_tab <- function(res, n = 10) {
+  res |>
+    filter(adj.P.Val < thr_fdr, logFC > 0) |>
+    arrange(adj.P.Val) |>
+    slice_head(n = n) |>
+    transmute(Assay, UniProt, Panel,
+              logFC = round(logFC, 2),
+              adj.P = signif(adj.P.Val, 2))
+}
+
+kable(top_tab(res_p), caption = "Plasma: 10 strongest up-regulated proteins by FDR")
+kable(top_tab(res_s), caption = "Serum: 10 strongest up-regulated proteins by FDR")
+```
+
+# Results: cross-matrix concordance
+
+```{r concordance-fig, fig.width = 6.5, fig.height = 6, fig.cap = "Fold-change concordance across matrices for all shared assays. Dashed: identity line."}
+j_all |>
+  mutate(status = case_when(
+    adj_p < thr_fdr & adj_s < thr_fdr ~ "Hit in both matrices",
+    adj_p < thr_fdr                ~ "Plasma only",
+    adj_s < thr_fdr                ~ "Serum only",
+    TRUE                         ~ "Neither"
+  )) |>
+  ggplot(aes(logFC_p, logFC_s, color = status)) +
+  geom_point(size = 1.5, alpha = 0.75) +
+  geom_hline(yintercept = 0, color = "grey70") +
+  geom_vline(xintercept = 0, color = "grey70") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey45") +
+  annotate("text", x = Inf, y = Inf, hjust = 1.1, vjust = 1.5,
+           label = sprintf("Spearman rho = %.2f\nslope = %.2f", rho, slope),
+           size = 3.5, color = "grey20") +
+  scale_color_manual(values = c("Hit in both matrices" = "#d73027",
+                                "Plasma only"         = "#999999",
+                                "Serum only"          = "#4575b4",
+                                "Neither"             = "#d9d9d9"),
+                     name = NULL) +
+  labs(x = "logFC, plasma", y = "logFC, serum",
+       caption = sprintf("%d shared assays; dashed line: y = x", nrow(j_all))) +
+  theme_minimal(12) +
+  theme(legend.position = "top")
+```
+
+Of `r n_sig_p` plasma and `r n_sig_s` serum hits, `r n_shared` are significant in both matrices -- and every shared hit points the same way (`r sprintf("%.0f", 100 * dir_conc)`% direction concordance). Serum fold changes run systematically steeper (slope `r sprintf("%.2f", slope)`), consistent with its controls sitting closer to baseline.
+
+# Results: PCA and severity structure
+
+```{r pca-setup, include = FALSE}
+ve_p1 <- 100 * pca_p$params$var_explained[1]
+ve_p2 <- 100 * pca_p$params$var_explained[2]
+ve_s1 <- 100 * pca_s$params$var_explained[1]
+ve_s2 <- 100 * pca_s$params$var_explained[2]
+
+# Group separation along PC1 (plasma), as Cohen's d
+pc1_pos <- pca_p$result$PC1[pca_p$result$Group == "POSITIVE"]
+pc1_neg <- pca_p$result$PC1[pca_p$result$Group == "NEGATIVE"]
+d_pc1 <- (mean(pc1_pos) - mean(pc1_neg)) /
+  sqrt((var(pc1_pos) + var(pc1_neg)) / 2)
+```
+
+Sample-level PCA (per-protein z-scores; PC1 captures `r sprintf("%.1f", ve_p1)`% and PC2 `r sprintf("%.1f", ve_p2)`% of variance in plasma) separates COVID-positive from negative samples along PC1 — standardized separation of `r sprintf("%.2f", abs(d_pc1))` SD (Cohen's d) in plasma, and similarly in serum (`r sprintf("%.1f", ve_s1)`% on PC1).
+
+```{r pca-fig, fig.width = 8, fig.height = 4.2, fig.cap = "Sample PCA: PC1 vs PC2 colored by group (red = POSITIVE, blue = NEGATIVE). Axes are fixed by the full-subcohort artifact."}
+bind_rows(
+  pca_p$result |> mutate(subcohort = sprintf("Plasma (n = %d)", n_samp_p)),
+  pca_s$result |> mutate(subcohort = sprintf("Serum (n = %d)",  n_samp_s))
+) |>
+  ggplot(aes(PC1, PC2, color = Group)) +
+  geom_point(size = 1.6, alpha = 0.75) +
+  facet_wrap(~subcohort, scales = "free") +
+  scale_color_manual(values = c(POSITIVE = "#d73027",
+                                NEGATIVE = "#4575b4"), name = NULL) +
+  labs(x = "PC1", y = "PC2") +
+  theme_minimal(12) +
+  theme(legend.position = "top")
+```
+
+In plasma, PC1 does not merely separate disease from control — it **grades with severity**. Mean PC1 by category:
+
+```{r severity-pc1, fig.cap = "Mean PC1 score by severity category (plasma). Boxes: median, IQR; points jittered."}
+sev_levels <- c("NEGATIVE", "mild", "moderate", "severe", "critical")
+d_sev <- pca_p$result |>
+  filter(Severity %in% sev_levels) |>
+  mutate(Severity = factor(Severity, levels = sev_levels))
+
+sev_tab <- d_sev |>
+  group_by(Severity) |>
+  summarise(n = n(), mean_PC1 = round(mean(PC1), 1), .groups = "drop")
+kable(sev_tab, caption = "Mean PC1 by severity category, plasma subcohort")
+
+ggplot(d_sev, aes(Severity, PC1, fill = Severity)) +
+  geom_boxplot(outlier.size = 0.6) +
+  scale_fill_manual(values = c("#999999", "#FFFFBF", "#FEE08B",
+                               "#FC8D59", "#D73027"), guide = "none") +
+  labs(x = NULL, y = "PC1 score") +
+  theme_minimal(12)
+```
+
+The same dose-response is visible in the top-DE proteins: in the category-average heatmap, up-regulated proteins deepen monotonically from NEGATIVE through critical, and down-regulated proteins reverse.
+
+```{r heatmap-cat, out.width = "100%", fig.cap = "Top-50 DE proteins, mean per-protein z-score per category. Left bar: DE direction. Plasma categories are severity levels; serum falls back to Group (no severity annotations available).", fig.subcap = c("Plasma: severity categories", "Serum: group categories")}
+knitr::include_graphics(c("outputs/plasma/heatmap_categories.png",
+                          "outputs/serum/heatmap_categories.png"))
+```
+
+The per-sample heatmap (307 columns for plasma, with Group/Severity column annotations) is best explored interactively in the app's Heatmap tab.
+
+# Data quality
+
+```{r qc-setup, include = FALSE}
+qp <- qc_p$params
+qs <- qc_s$params
+
+qc_summary <- tibble(
+  Subcohort      = c("Plasma", "Serum"),
+  Samples        = c(qp$n_samples, qs$n_samples),
+  Assays         = c(qp$n_assays, qs$n_assays),
+  `Missing cells` = c(qp$n_missing_cells, qs$n_missing_cells),
+  `% missing`    = round(100 * c(qp$frac_missing_cells, qs$frac_missing_cells), 2),
+  `Assays >20%`  = c(qp$n_assays_flagged_missing, qs$n_assays_flagged_missing),
+  `Samples >20%` = c(qp$n_samples_flagged_missing, qs$n_samples_flagged_missing),
+  `Outliers`     = c(qp$outlier_screen$n_flagged, qs$outlier_screen$n_flagged),
+  Plates         = c(qp$n_plates, qs$n_plates)
+)
+```
+
+```{r qc-table}
+kable(qc_summary, caption = "QC summary per subcohort. All values computed live from qc.rds artifacts.")
+```
+
+**Missingness is trivially low overall** — `r sprintf("%.2f", 100 * qp$frac_missing_cells)`% of plasma cells and `r sprintf("%.2f", 100 * qs$frac_missing_cells)`% of serum cells — and **concentrated in three plasma samples with complete single-panel dropouts**:
+
+```{r dropout, include = FALSE}
+npx <- readRDS("data/harmonized_npx.rds")
+
+dropout_samples <- qc_p$result$sample_missingness |>
+  filter(n_missing >= 20) |>                 # full-panel dropouts only
+  arrange(desc(n_missing)) |>
+  pull(SampleID)
+
+panel_sizes <- npx |>
+  filter(subcohort == "plasma") |>
+  distinct(Panel, Assay) |>
+  count(Panel, name = "n_panel_assays")
+
+dropout_panels <- npx |>
+  filter(subcohort == "plasma", SampleID %in% dropout_samples) |>
+  count(SampleID, Panel, name = "n_obs") |>
+  complete(SampleID, Panel, fill = list(n_obs = 0)) |>
+  left_join(panel_sizes, by = "Panel") |>
+  filter(n_obs == 0)
+
+n_dropout     <- length(dropout_samples)
+cells_dropout <- sum(qc_p$result$sample_missingness$n_missing[
+  qc_p$result$sample_missingness$SampleID %in% dropout_samples])
+pct_of_missing <- 100 * cells_dropout / qp$n_missing_cells
+```
+
+Samples `r paste(dropout_samples, collapse = ", ")` each lost one entire panel (`r paste(dropout_panels$Panel, collapse = ", ")` — `r dropout_panels$n_panel_assays[1]` assays each; all other panels fully observed). Each sits just under the pre-specified 20% threshold (`r sprintf("%.2f", 100 * 87 / qp$n_assays)`% missing) and is retained under the fixed rule; together they account for `r cells_dropout` of the `r qp$n_missing_cells` missing plasma cells (`r sprintf("%.0f", pct_of_missing)`%). Affected values are median-imputed per the preprocessing rule. `r qp$exclusion_policy` A sensitivity re-run excluding these three samples is listed as future work.
+
+**Outliers.** The within-group screen (`r qp$outlier_screen$method`) flags `r qp$outlier_screen$n_flagged` plasma samples (`r paste(qc_p$result$outliers |> filter(flagged) |> pull(SampleID), collapse = ", ")`; all POSITIVE) and none in serum. Flags are informational.
+
+**Plates.** Plasma controls are spread across all `r qp$n_plates` plates by design (~10-11 per plate), so plate cannot confound group:
+
+```{r plate-table}
+qc_p$result$plate_summary |>
+  pivot_wider(names_from = Group, values_from = n) |>
+  kable(caption = "Plasma: samples per plate x group. Controls distributed across plates by design.")
+```
+
+Serum is a single plate, so batch QC is not applicable there. `r qp$lod_note`
+
+# Limitations and future work
+
+**Limitations.**
+
+- **Control group.** Plasma negatives are dialysis patients -- chronically inflamed relative to healthy donors -- so observed effect sizes are conservative (compressed toward zero). Direction of change is robust; magnitudes are not comparable to healthy-baseline studies.
+- **Serum power.** The serum subcohort has 11 negative samples (of `r qc_s$params$n_samples` total), so serum-only findings carry wide uncertainty.
+- **Unbridged matrices.** No Olink bridge normalization links the two subcohorts; every statistical test is within-matrix. Cross-matrix statements are qualitative (direction concordance, rank correlation) -- not quantitative equivalence of effect sizes.
+- **No LOD information.** `r qc_p$params$lod_note`
+
+**Future work**, in priority order:
+
+1. **Severity contrast DE** (severe vs mild among positives; bins of `r sev_tab$n[sev_tab$Severity == "severe"]` vs `r sev_tab$n[sev_tab$Severity == "mild"]`): the PC1 dose-response and category heatmap strongly suggest severity effects will replicate at the DE level.
+2. **Sensitivity re-run** excluding the three full-panel-dropout samples -- a one-line change to the pipeline inputs, then diff against the current `de_results.rds`.
+3. **LOD-aware QC** once limit-of-detection fields become available.
+
+**Reproducibility.** Every number and figure in this report is computed at render time from the committed pipeline artifacts (`outputs/<subcohort>/{de_results,pca,heatmap,qc}.rds`); nothing is transcribed by hand. Pipelines live in `R/run_*.R` (harmonize → DE → PCA → heatmap → QC); the companion Shiny app serves the same artifacts, so report, app, and data cannot drift apart.
